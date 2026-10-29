@@ -669,6 +669,18 @@ class KeyEventManager:
             if dolphie.replay_file:
                 self.app.action_replay_seek()
 
+        elif key == "comma":
+            if dolphie.replay_file:
+                self.app.action_gtid_mark_segment_start()
+
+        elif key == "full_stop":
+            if dolphie.replay_file:
+                self.app.action_gtid_mark_segment_end()
+
+        elif key == "G":
+            if dolphie.replay_file:
+                self.app.action_gtid_barrier_compare()
+
         elif key == "t":
             if dolphie.connection_source == ConnectionSource.proxysql:
 

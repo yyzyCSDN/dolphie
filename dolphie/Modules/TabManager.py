@@ -194,9 +194,20 @@ class Tab:
             f"[b][$green]{max_timestamp}[/b][$green]" if max_timestamp == current_timestamp else max_timestamp
         )
 
+        # Show the GTID comparison segment markers, if any, while scrubbing this recording
+        segment = ""
+        segment_start = replay_manager.gtid_segment_start_id
+        segment_end = replay_manager.gtid_segment_end_id
+        if segment_start is not None or segment_end is not None:
+            start_label = f"#{segment_start}" if segment_start is not None else "[$dark_gray]?[/$dark_gray]"
+            end_label = f"#{segment_end}" if segment_end is not None else "[$dark_gray]?[/$dark_gray]"
+            segment = (
+                f"  [$b_highlight]GTID segment[/$b_highlight] {start_label} [$b_highlight]->[/$b_highlight] {end_label}"
+            )
+
         # Update the dashboard title with the timestamp of the replay event
         self.dashboard_replay.update(
-            f"[b]Replay[/b] ([$dark_gray]{os.path.basename(self.dolphie.replay_file)} · UTC[/$dark_gray])"
+            f"[b]Replay[/b] ([$dark_gray]{os.path.basename(self.dolphie.replay_file)} · UTC[/$dark_gray]){segment}"
         )
         self.dashboard_replay_start_end.update(
             f"{min_timestamp} [$b_highlight]<-[/$b_highlight] "

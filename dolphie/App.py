@@ -31,6 +31,7 @@ from dolphie.DataTypes import ConnectionSource, ConnectionStatus, HotkeyCommands
 from dolphie.Modules.ArgumentParser import ArgumentParser, Config
 from dolphie.Modules.CommandManager import CommandManager
 from dolphie.Modules.CommandPalette import CommandPaletteCommands
+from dolphie.Modules.GtidReplaySync import BarrierMatchResult, BarrierStatus, locate_gtid_barrier
 from dolphie.Modules.KeyEventManager import KeyEventManager
 from dolphie.Modules.ReplayManager import ReplayManager
 from dolphie.Modules.TabManager import Tab, TabManager
@@ -50,6 +51,8 @@ from dolphie.Panels import ProxySQLQueryRules as ProxySQLQueryRulesPanel
 from dolphie.Panels import Replication as ReplicationPanel
 from dolphie.Panels import StatementsSummaryMetrics as StatementsSummaryPanel
 from dolphie.Widgets.CommandModal import CommandModal
+from dolphie.Widgets.GtidCompareModal import GtidCompareModal
+from dolphie.Widgets.GtidCompareResultScreen import GtidCompareResultScreen
 from dolphie.Widgets.TopBar import TopBar
 
 try:
@@ -308,6 +311,226 @@ class DolphieApp(App):
             ),
             command_get_input,
         )
+
+    # GTID transaction progress comparison between two open MySQL replay recordings.
+    # The active replay tab is the master side (its current frame is the barrier) and
+    # another open MySQL replay tab supplies the target segment marked with ,/. .
+    def action_gtid_mark_segment_start(self) -> None:
+        tab = self.tab_manager.active_tab
+        replay_manager = self._gtid_replay_manager(tab)
+        if tab is None or replay_manager is None:
+            return
+
+        try:
+            frame_id, timestamp = replay_manager.mark_gtid_segment_start()
+        except ValueError as error:
+            self.notify(str(error), title="GTID segment", severity="error")
+            return
+
+        self.notify(
+            f"Target segment first frame: #[$highlight]{frame_id}[/$highlight] "
+            f"[$light_blue]{timestamp}[/$light_blue] UTC",
+            title="GTID segment",
+            severity="information",
+        )
+        tab.refresh_replay_dashboard_section()
+
+    def action_gtid_mark_segment_end(self) -> None:
+        tab = self.tab_manager.active_tab
+        replay_manager = self._gtid_replay_manager(tab)
+        if tab is None or replay_manager is None:
+            return
+
+        try:
+            frame_id, timestamp = replay_manager.mark_gtid_segment_end()
+        except ValueError as error:
+            self.notify(str(error), title="GTID segment", severity="error")
+            return
+
+        self.notify(
+            f"Target segment last frame: #[$highlight]{frame_id}[/$highlight] "
+            f"[$light_blue]{timestamp}[/$light_blue] UTC",
+            title="GTID segment",
+            severity="information",
+        )
+        tab.refresh_replay_dashboard_section()
+
+    @staticmethod
+    def _gtid_replay_manager(tab: Tab | None) -> ReplayManager | None:
+        """The active tab's manager when it is a paused-or-playing MySQL replay, else None."""
+        if (
+            tab is None
+            or not tab.dolphie.replay_file
+            or tab.replay_manager is None
+            or tab.dolphie.connection_source != ConnectionSource.mysql
+        ):
+            return None
+        return tab.replay_manager
+
+    def _gtid_target_candidates(self, master_tab: Tab) -> list[tuple[str, str]]:
+        """Other open MySQL replay tabs with a scannable first/last segment window."""
+        candidates: list[tuple[str, str]] = []
+        for tab in self.tab_manager.tabs.values():
+            if tab is master_tab or self._gtid_replay_manager(tab) is None:
+                continue
+
+            replay_manager = tab.replay_manager
+            assert replay_manager is not None
+            try:
+                window = replay_manager.gtid_segment_window()
+            except ValueError as error:
+                self.notify(str(error), title="GTID segment", severity="warning")
+                continue
+            if window is None:
+                continue
+
+            start_id, end_id = window
+            marked = replay_manager.gtid_segment_start_id is not None or replay_manager.gtid_segment_end_id is not None
+            start_timestamp = replay_manager.frame_timestamp(start_id)
+            end_timestamp = replay_manager.frame_timestamp(end_id)
+            label = (
+                f"{tab.dolphie.host}:{tab.dolphie.port} · {os.path.basename(tab.dolphie.replay_file or '')}"
+                f" · {'marked' if marked else 'whole recording'} · frames #{start_id} ({start_timestamp})"
+                f" -> #{end_id} ({end_timestamp})"
+            )
+            candidates.append((tab.id, label))
+        return candidates
+
+    def action_gtid_barrier_compare(self) -> None:
+        master_tab = self.tab_manager.active_tab
+        master_manager = self._gtid_replay_manager(master_tab)
+        if master_tab is None or master_manager is None:
+            return
+
+        master_frame_id = master_manager.current_replay_id
+        if master_frame_id <= 0:
+            self.notify("Load a frame on the master recording first", title="GTID comparison", severity="warning")
+            return
+
+        candidates = self._gtid_target_candidates(master_tab)
+        if not candidates:
+            self.notify(
+                "Open the replica's MySQL recording in another tab. Mark its segment with ',' and '.' there "
+                "(or leave unmarked to scan the whole recording)",
+                title="No GTID comparison target",
+                severity="warning",
+                timeout=10,
+            )
+            return
+
+        master_description = (
+            f"[$label]Master barrier[/$label]  frame #[$b_light_blue]{master_frame_id}[/$b_light_blue]"
+            f"  [$light_blue]{master_manager.current_replay_timestamp}[/$light_blue] UTC"
+            f"  [$dark_gray]{os.path.basename(master_tab.dolphie.replay_file or '')}[/$dark_gray]\n"
+            "[$dark_gray]The frame's complete server-level gtid_executed is the barrier; re-run after "
+            "choosing a different master frame to recalculate.[/$dark_gray]"
+        )
+
+        def command_get_input(target_tab_id: object | None) -> None:
+            if not isinstance(target_tab_id, str):
+                return
+
+            target_tab = self.tab_manager.get_tab(target_tab_id)
+            target_manager = self._gtid_replay_manager(target_tab)
+            if target_tab is None or target_manager is None:
+                return
+            try:
+                window = target_manager.gtid_segment_window()
+            except ValueError as error:
+                self.notify(str(error), title="GTID segment", severity="error")
+                return
+            if window is None:
+                self.notify("The target recording has no frames", title="GTID comparison", severity="error")
+                return
+
+            self.run_gtid_barrier_match(master_tab.id, target_tab_id, master_frame_id, window[0], window[1])
+
+        self.push_screen(GtidCompareModal(master_description, candidates), command_get_input)
+
+    @work(thread=True, group="gtid_compare", exclusive=True)
+    async def run_gtid_barrier_match(
+        self, master_tab_id: str, target_tab_id: str, master_frame_id: int, segment_start_id: int, segment_end_id: int
+    ) -> None:
+        """Scans the target recording off the UI thread; decompressing a long segment can take seconds."""
+        master_tab = self.tab_manager.get_tab(master_tab_id)
+        target_tab = self.tab_manager.get_tab(target_tab_id)
+        if (
+            master_tab is None
+            or target_tab is None
+            or master_tab.replay_manager is None
+            or target_tab.replay_manager is None
+        ):
+            self.call_from_thread(
+                self.notify, "A replay tab involved in the comparison was closed", title="GTID comparison"
+            )
+            return
+
+        try:
+            result = locate_gtid_barrier(
+                master_tab.replay_manager,
+                master_frame_id,
+                target_tab.replay_manager,
+                segment_start_id,
+                segment_end_id,
+            )
+        except Exception as error:
+            logger.exception("GTID barrier comparison failed")
+            self.call_from_thread(
+                self.notify,
+                f"The comparison could not read the recordings: {error}",
+                title="GTID comparison",
+                severity="error",
+            )
+            return
+        self.call_from_thread(self._finish_gtid_barrier_match, result, master_tab, target_tab)
+
+    def _finish_gtid_barrier_match(self, result: BarrierMatchResult, master_tab: Tab, target_tab: Tab) -> None:
+        """On a match, updates both cursors and derived state together; otherwise leaves positions alone."""
+        if result.matched:
+            # Pause both replays so auto-play cannot walk either cursor off the matched frames.
+            master_tab.dolphie.pause_refresh = True
+            target_tab.dolphie.pause_refresh = True
+            master_tab.replay_controls.paused = True
+
+            assert master_tab.replay_manager is not None
+            assert target_tab.replay_manager is not None
+            assert result.master_replay_id is not None
+            assert result.target_replay_id is not None
+            # The master barrier frame is the frame the master tab already renders, so leave its
+            # cursor on it. The inactive target tab is parked on its frame too; switching to either
+            # tab reloads that frame as current data, bringing its graph window to the match.
+            master_tab.replay_manager.position_at_frame(result.master_replay_id)
+            target_tab.replay_manager.position_at_frame(result.target_replay_id)
+            master_tab.refresh_replay_dashboard_section()
+
+            self.notify(
+                f"Barrier contained at target frame #[$highlight]{result.target_replay_id}[/$highlight]; "
+                "both cursors updated",
+                title="GTID comparison",
+                severity="information",
+            )
+        elif result.status is BarrierStatus.not_reached:
+            self.notify("Target segment does not reach the barrier yet", title="GTID comparison", severity="warning")
+        else:
+            self.notify(result.reason or "Cannot determine", title="GTID comparison", severity="error")
+
+        context = self.key_event_manager._screen_context(master_tab.dolphie)
+        self.push_screen(
+            GtidCompareResultScreen(
+                context,
+                result,
+                master_tab_id=master_tab.id,
+                target_tab_id=target_tab.id,
+                master_filename=os.path.basename(master_tab.dolphie.replay_file or ""),
+                target_filename=os.path.basename(target_tab.dolphie.replay_file or ""),
+            )
+        )
+
+    def goto_gtid_compare_tab(self, tab_id: str) -> None:
+        """Activates the master or target tab after a comparison so its matched graph window renders."""
+        tab = self.tab_manager.get_tab(tab_id)
+        if tab is not None and self.tab_manager.active_tab is not tab:
+            self.tab_manager.host_tabs.active = tab_id
 
     @on(RadioSet.Changed, "#pfs_metrics_radio_set")
     def replay_pfs_metrics_radio_set_changed(self, event: RadioSet.Changed):

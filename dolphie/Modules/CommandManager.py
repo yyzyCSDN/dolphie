@@ -347,6 +347,18 @@ class CommandManager:
                         "human_key": "]",
                         "description": "Seek to next refresh interval in the replay",
                     },
+                    "comma": {
+                        "human_key": ",",
+                        "description": "Mark current frame as first of the GTID comparison segment",
+                    },
+                    "full_stop": {
+                        "human_key": ".",
+                        "description": "Mark current frame as last of the GTID comparison segment",
+                    },
+                    "G": {
+                        "human_key": "G",
+                        "description": "GTID transaction progress comparison with another MySQL replay",
+                    },
                     "placeholder_5": {"human_key": "", "description": ""},
                     "c": {"human_key": "c", "description": "Clear all filters set"},
                     "f": {

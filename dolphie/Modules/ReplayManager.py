@@ -71,6 +71,21 @@ class ProxySQLReplayData:
 ProcesslistThreadType = TypeVar("ProcesslistThreadType", ProcesslistThread, ProxySQLProcesslistThread)
 
 
+class CorruptFrameError(Exception):
+    """A frame row exists at the replay id but its payload cannot be read.
+
+    Unlike the playback path, which skips unreadable rows, the GTID barrier scan must
+    stop on one: monotonic set containment cannot be proven across a missing
+    observation.
+    """
+
+    def __init__(self, replay_id: int, timestamp: str | None, cause: Exception):
+        self.replay_id = replay_id
+        self.timestamp = timestamp
+        self.cause = cause
+        super().__init__(f"Corrupt replay frame {replay_id} ({timestamp}): {cause}")
+
+
 class ReplayManager:
     """ReplayManager class for capturing and replaying Dolphie instance states."""
 
@@ -158,6 +173,13 @@ class ReplayManager:
         self._write_lock = threading.Lock()
         self.global_variable_change_ids: list[int] = []
         self.has_summary: bool = False
+
+        # Optional first/last frames of a target recording segment for the GTID barrier
+        # comparison. They are replay ids in this file; None means the file's current
+        # boundaries are used. They live here (not on the tab) because they belong to a
+        # specific recording and must not survive a file swap, which builds a new manager.
+        self.gtid_segment_start_id: int | None = None
+        self.gtid_segment_end_id: int | None = None
 
         # Cache of decompressed metric_manager payloads keyed by replay id. Row data is
         # immutable for a given id, so entries never go stale; consecutive backward/seek
@@ -638,6 +660,129 @@ class ReplayManager:
                 timeout=10,
             )
 
+        return True
+
+    def read_recorded_frame(self, replay_id: int) -> tuple[str, dict[str, Any]] | None:
+        """Reads one frame's full payload without moving the playback cursor.
+
+        The GTID barrier comparison scans a target segment while the user's playback
+        position must stay untouched on failure, so this never touches
+        ``current_replay_id``. The full row is read (never the summary) because the
+        summary cuts ``global_variables`` down to a handful of fields and drops
+        ``gtid_executed``.
+
+        Args:
+            replay_id: The frame's primary key.
+
+        Returns:
+            Tuple of (timestamp, data dict), or None when no row exists at the id (a
+            retention-purge hole).
+
+        Raises:
+            CorruptFrameError: The row exists but its payload cannot be read.
+        """
+        row = self._execute_select_one(
+            "SELECT timestamp, data FROM replay_data WHERE id = ?",
+            (replay_id,),
+        )
+        if row is None:
+            return None
+
+        try:
+            return row[0], self._decode_row(row[1])
+        except self.UNREADABLE_ROW_ERRORS as cause:
+            raise CorruptFrameError(replay_id, row[0], cause) from cause
+
+    def frame_timestamp(self, replay_id: int) -> str | None:
+        """Returns a frame's raw timestamp without reading or decoding its payload."""
+        row = self._execute_select_one("SELECT timestamp FROM replay_data WHERE id = ?", (replay_id,))
+        return row[0] if row else None
+
+    def frame_exists(self, replay_id: int) -> bool:
+        """Whether a frame row exists at the given id (a purged id returns False)."""
+        return self._execute_select_one("SELECT 1 FROM replay_data WHERE id = ?", (replay_id,)) is not None
+
+    def mark_gtid_segment_start(self, replay_id: int | None = None) -> tuple[int, str]:
+        """Marks a frame as the first frame of the GTID comparison target segment.
+
+        Defaults to the frame under the playback cursor.
+
+        Raises:
+            ValueError: The frame does not exist in the file or is after the end marker.
+        """
+        replay_id = self.current_replay_id if replay_id is None else replay_id
+        timestamp = self.frame_timestamp(replay_id)
+        if timestamp is None:
+            raise ValueError(f"Frame {replay_id} does not exist in this recording")
+        if self.gtid_segment_end_id is not None and replay_id > self.gtid_segment_end_id:
+            raise ValueError("The first frame must not be after the last frame of the segment")
+
+        self.gtid_segment_start_id = replay_id
+        return replay_id, timestamp
+
+    def mark_gtid_segment_end(self, replay_id: int | None = None) -> tuple[int, str]:
+        """Marks a frame as the last frame of the GTID comparison target segment.
+
+        Defaults to the frame under the playback cursor.
+
+        Raises:
+            ValueError: The frame does not exist in the file or is before the start marker.
+        """
+        replay_id = self.current_replay_id if replay_id is None else replay_id
+        timestamp = self.frame_timestamp(replay_id)
+        if timestamp is None:
+            raise ValueError(f"Frame {replay_id} does not exist in this recording")
+        if self.gtid_segment_start_id is not None and replay_id < self.gtid_segment_start_id:
+            raise ValueError("The last frame must not be before the first frame of the segment")
+
+        self.gtid_segment_end_id = replay_id
+        return replay_id, timestamp
+
+    def gtid_segment_window(self) -> tuple[int, int] | None:
+        """Resolves the marked target segment to (first_id, last_id).
+
+        Without markers the whole recording is used. Returns None when the file holds no
+        rows. A marker purged past the file's head makes the segment invalid; callers
+        surface that instead of silently scanning a different range.
+        """
+        if not self._update_replay_metadata_cache():
+            return None
+
+        start_id = self.gtid_segment_start_id
+        end_id = self.gtid_segment_end_id
+        if start_id is not None and not (self.min_replay_id <= start_id <= self.max_replay_id):
+            raise ValueError("The marked first frame is no longer present in the recording")
+        if end_id is not None and not (self.min_replay_id <= end_id <= self.max_replay_id):
+            raise ValueError("The marked last frame is no longer present in the recording")
+
+        return start_id or self.min_replay_id, end_id or self.max_replay_id
+
+    def arm_frame_for_playback(self, replay_id: int) -> bool:
+        """Positions the cursor just before a frame so the next replay worker tick loads it.
+
+        This is the same convention a seek uses; it is for the tab the comparison keeps
+        active, whose worker runs immediately.
+        """
+        timestamp = self.frame_timestamp(replay_id)
+        if timestamp is None:
+            return False
+
+        self.current_replay_id = replay_id - 1
+        self.current_replay_timestamp = timestamp
+        return True
+
+    def position_at_frame(self, replay_id: int) -> bool:
+        """Positions the cursor on a frame an inactive tab will load when switched to.
+
+        Switching to a tab reloads its current frame (``need_current_data``), so the
+        cursor is left ON the matched frame rather than one before it.
+        """
+        timestamp = self.frame_timestamp(replay_id)
+        if timestamp is None:
+            return False
+
+        self.current_replay_id = replay_id
+        self.current_replay_timestamp = timestamp
         return True
 
     def _create_new_replay_file(self, new_replay_file: str):
