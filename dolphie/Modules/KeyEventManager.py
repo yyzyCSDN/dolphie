@@ -34,6 +34,13 @@ from dolphie.Modules.Functions import (
 )
 from dolphie.Modules.ManualException import ManualException
 from dolphie.Modules.Queries import MySQLQueries, ProxySQLQueries
+from dolphie.Modules.ReplicationRouting import (
+    AuditNotice,
+    RoutingAuditConfig,
+    build_routing_audit_renderable,
+    load_routing_audit_config,
+    run_routing_audit,
+)
 from dolphie.Modules.Theme import ThemedTable as Table
 from dolphie.Modules.Theme import themed_text
 from dolphie.Widgets.CommandModal import CommandModal
@@ -41,11 +48,13 @@ from dolphie.Widgets.CommandScreen import CommandScreen
 from dolphie.Widgets.DolphieScreen import ScreenContext
 from dolphie.Widgets.EventLogScreen import EventLog
 from dolphie.Widgets.ProxySQLThreadScreen import ProxySQLThreadScreen
+from dolphie.Widgets.RoutingAuditModal import RoutingAuditModal
 from dolphie.Widgets.ThreadScreen import ThreadScreen
 
 if TYPE_CHECKING:
     from dolphie.App import DolphieApp
     from dolphie.Dolphie import Dolphie
+    from dolphie.Modules.TabManager import Tab
 
 
 class KeyEventManager:
@@ -398,6 +407,9 @@ class KeyEventManager:
         # Database operation commands
         elif key == "d":
             self.execute_command_in_thread(key=key)
+
+        elif key == "G":
+            self.start_routing_audit(tab)
 
         elif key == "D":
             await self.app.tab_manager.disconnect_tab(tab)
@@ -921,6 +933,79 @@ class KeyEventManager:
 
         thread = threading.Thread(target=_run_command, daemon=True)
         thread.start()
+
+    def start_routing_audit(self, tab: Tab) -> None:
+        """Open the read-only multi-source table routing audit.
+
+        Effective per-channel filters come from the polled SHOW REPLICA STATUS rows; the
+        secondary connection reads lower_case_table_names and the base-table candidates so
+        the main poller is untouched. Nothing in this flow changes replication configuration.
+        """
+        dolphie = tab.dolphie
+
+        if dolphie.connection_source == ConnectionSource.proxysql or dolphie.replay_file:
+            self.app.notify("The routing audit is only available on live MySQL/MariaDB connections")
+            return
+
+        # Local import keeps the panel module (and its TabManager import) out of this module's
+        # import chain.
+        from dolphie.Panels.Replication import user_replication_channels
+
+        status_rows = [row.copy() for row in user_replication_channels(dolphie.replication_status)]
+        if not status_rows:
+            self.app.notify("The routing audit requires at least one user replication channel")
+            return
+
+        connection = dolphie.secondary_db_connection
+
+        def run_audit(
+            selection: dict[str, list[tuple[str, str]]] | None,
+            config: RoutingAuditConfig,
+        ) -> None:
+            if not selection:
+                return
+
+            channel_inputs = [
+                (config.filters_by_channel[channel], tables)
+                for channel, tables in selection.items()
+                if channel in config.filters_by_channel
+            ]
+            audit = run_routing_audit(channel_inputs, config.lower_case_table_names)
+            for message in reversed(config.notices):
+                audit.notices.insert(0, AuditNotice(None, message))
+
+            self.app.app.push_screen(
+                CommandScreen(self._screen_context(dolphie), build_routing_audit_renderable(audit))
+            )
+
+        def open_audit_modal(config: RoutingAuditConfig) -> None:
+            channel_order = [coerce_str(row.get("Channel_Name")) for row in status_rows]
+            channels = [(name, config.filters_by_channel[name]) for name in channel_order]
+            self.app.app.push_screen(
+                RoutingAuditModal(channels, config.base_tables, config.lower_case_table_names),
+                lambda selection: run_audit(selection, config),
+            )
+
+        def gather_and_open() -> None:
+            self.app.call_from_thread(tab.spinner.show)
+            try:
+                config = load_routing_audit_config(connection, status_rows)
+                self.app.call_from_thread(open_audit_modal, config)
+            except ManualException as error:
+                # Bind the message eagerly: Python deletes the exception variable at the end of
+                # the except block, before the UI thread invokes the lambda.
+                self.app.call_from_thread(
+                    lambda reason=error.reason: self.app.notify(
+                        reason,
+                        title="Error running command 'G'",
+                        severity="error",
+                        timeout=10,
+                    )
+                )
+            finally:
+                self.app.call_from_thread(tab.spinner.hide)
+
+        threading.Thread(target=gather_and_open, daemon=True).start()
 
     def _execute_command(self, key: str, additional_data: object = None) -> None:
         """Internal implementation of command execution."""

@@ -139,6 +139,10 @@ class CommandManager:
                         "human_key": "E",
                         "description": "Export the processlist to a CSV file",
                     },
+                    "G": {
+                        "human_key": "G",
+                        "description": "Audit multi-source replication table routing (read-only)",
+                    },
                     "k": {"human_key": "k", "description": "Kill thread(s)"},
                     "M": {"human_key": "M", "description": "Maximize a panel"},
                     "q": {"human_key": "q", "description": "Quit"},

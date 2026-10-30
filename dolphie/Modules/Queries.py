@@ -539,6 +539,21 @@ class MySQLQueries:
         ORDER BY
             SCHEMA_NAME
     """
+    # Actual base tables (views excluded) offered as explicit choices for the read-only
+    # multi-source routing audit. information_schema only exposes rows the user can see,
+    # so the audit modal also accepts typed schema.table names.
+    base_tables: str = """
+        SELECT
+            TABLE_SCHEMA AS table_schema,
+            TABLE_NAME   AS table_name
+        FROM
+            information_schema.TABLES
+        WHERE
+            TABLE_TYPE = 'BASE TABLE'
+        ORDER BY
+            TABLE_SCHEMA,
+            TABLE_NAME
+    """
     innodb_metrics: str = """
         SELECT
             NAME,
