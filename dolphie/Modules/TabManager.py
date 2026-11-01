@@ -119,6 +119,10 @@ class Tab:
 
         self.pfs_metrics_file_io_datatable = app.query_one("#pfs_metrics_file_io_datatable", DataTable)
         self.pfs_metrics_table_io_waits_datatable = app.query_one("#pfs_metrics_table_io_waits_datatable", DataTable)
+        self.pfs_metrics_file_io_attribution_datatable = app.query_one(
+            "#pfs_metrics_file_io_attribution_datatable", DataTable
+        )
+        self.pfs_metrics_attribution_info = app.query_one("#pfs_metrics_attribution_info", Label)
         self.pfs_metrics_radio_set = app.query_one("#pfs_metrics_radio_set", RadioSet)
         self.pfs_metrics_delta = app.query_one("#pfs_metrics_delta", RadioButton)
         self.pfs_metrics_tabs = app.query_one("#pfs_metrics_tabs", TabbedContent)
@@ -515,6 +519,15 @@ class TabManager:
                 id="pfs_metrics_table_io_waits_tab",
             ),
         )
+        attribution_pane = TabPane(
+            "File I/O Attribution",
+            Label(id="pfs_metrics_attribution_info"),
+            DataTable(id="pfs_metrics_file_io_attribution_datatable", show_cursor=False),
+            id="pfs_metrics_file_io_attribution_tab",
+        )
+        await pfs_metrics_tabs.add_pane(attribution_pane)
+        # Only live MySQL 8+ InnoDB tabs feed the ledger; the panel reveals it per host tab.
+        pfs_metrics_tabs.hide_tab("pfs_metrics_file_io_attribution_tab")
 
     async def create_tab(
         self,

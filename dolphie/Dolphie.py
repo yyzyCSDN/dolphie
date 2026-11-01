@@ -17,6 +17,7 @@ from packaging.version import parse as parse_version
 import dolphie.DataTypes as DataTypes
 import dolphie.Modules.MetricManager as MetricManager
 from dolphie.Modules.ArgumentParser import Config
+from dolphie.Modules.FileIOAttribution import FileIOAttributionLedger
 from dolphie.Modules.Functions import coerce_int, coerce_str, is_sqlite_database, load_host_cache_file
 from dolphie.Modules.MySQL import ConnectionSource, Database
 from dolphie.Modules.PerformanceSchemaMetrics import PerformanceSchemaMetrics
@@ -252,6 +253,9 @@ class Dolphie:
         self.file_io_data: PerformanceSchemaMetrics | None = None
         self.table_io_waits_data: PerformanceSchemaMetrics | None = None
         self.statements_summary_data: PerformanceSchemaMetrics | None = None
+        # The InnoDB physical file I/O attribution ledger is cumulative for the whole
+        # observation; a soft PFS delta reset deliberately leaves it untouched.
+        self.file_io_attribution: FileIOAttributionLedger | None = None
 
         if self.record_for_replay or self.panels.pfs_metrics.visible:
             self.pfs_metrics_last_reset_time: datetime | None = datetime.now().astimezone()
@@ -601,6 +605,11 @@ class Dolphie:
         return replay_files
 
     def reset_pfs_metrics_deltas(self, reset_fully: bool = False):
+        if reset_fully:
+            # A server restart starts a new observation: PFS counters were reset, so the
+            # attribution ledger's baselines and history cannot survive it.
+            self.file_io_attribution = None
+
         for instance in [self.file_io_data, self.table_io_waits_data]:
             if not instance:
                 continue

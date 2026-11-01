@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, cast
 from loguru import logger
 
 from dolphie.DataTypes import ConnectionSource, ConnectionStatus, DatabaseRow, DatabaseScalar, ReplicaRow
+from dolphie.Modules.FileIOAttribution import FileIOAttributionLedger
 from dolphie.Modules.Functions import coerce_float, coerce_int, coerce_str, host_without_port
 from dolphie.Modules.PerformanceSchemaMetrics import PerformanceSchemaMetrics
 from dolphie.Modules.Queries import MySQLQueries, ProxySQLQueries
@@ -488,6 +489,37 @@ class WorkerDataProcessor:
                         )
                     else:
                         dolphie.table_io_waits_data.update_internal_data(table_io_waits_data)
+
+                    # Feed the InnoDB physical file I/O attribution ledger. Live MySQL 8+ only:
+                    # MariaDB and pre-8 MySQL lack these information_schema identities, daemon
+                    # recordings don't serialize the ledger, and replay has no live samples.
+                    if (
+                        not dolphie.daemon_mode
+                        and not dolphie.replay_file
+                        and dolphie.connection_source_alt != ConnectionSource.mariadb
+                        and dolphie.is_mysql_version_at_least("8.0")
+                    ):
+                        dolphie.main_db_connection.execute(MySQLQueries.innodb_tablespaces)
+                        tablespaces_data = dolphie.main_db_connection.fetchall()
+                        tablespaces_ok = dolphie.main_db_connection.last_execute_successful
+
+                        dolphie.main_db_connection.execute(MySQLQueries.innodb_tables)
+                        innodb_tables_data = dolphie.main_db_connection.fetchall()
+                        tables_ok = dolphie.main_db_connection.last_execute_successful
+
+                        datadir = dolphie.main_db_connection.fetch_value_from_field(MySQLQueries.get_datadir, "datadir")
+
+                        # A failed or empty identity fetch is a missing observation: skip the
+                        # sample entirely so the interval is never booked as unattributed bytes.
+                        if tablespaces_ok and tables_ok and tablespaces_data and datadir is not None:
+                            if dolphie.file_io_attribution is None:
+                                dolphie.file_io_attribution = FileIOAttributionLedger()
+                            dolphie.file_io_attribution.record_sample(
+                                file_io_data,
+                                tablespaces_data,
+                                innodb_tables_data,
+                                coerce_str(datadir),
+                            )
 
                 if dolphie.panels.statements_summary.visible:
                     if (

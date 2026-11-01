@@ -141,6 +141,24 @@ async def test_performance_schema_metrics_panel(server: Server, tmp_path: Path) 
                 )
                 await harness.next_poll()
                 assert harness.tab.pfs_metrics_file_io_datatable.row_count >= 1
+
+                # MySQL 8+ feeds the physical file I/O attribution ledger from the same polls;
+                # the new tab is visible and its books stay conserved against measured bytes.
+                if (
+                    harness.dolphie.connection_source_alt == ConnectionSource.mysql
+                    and harness.dolphie.is_mysql_version_at_least("8.0")
+                ):
+                    await harness.wait_for(
+                        lambda: (
+                            harness.dolphie.file_io_attribution is not None
+                            and harness.dolphie.file_io_attribution.samples >= 2
+                        ),
+                        message="attribution ledger samples",
+                    )
+                    attribution = harness.dolphie.file_io_attribution
+                    assert attribution is not None
+                    assert attribution.conservation_holds()
+                    assert harness.tab.pfs_metrics_tabs.get_tab("pfs_metrics_file_io_attribution_tab").display is True
     finally:
         query(server, f"DROP DATABASE IF EXISTS {database}")
 

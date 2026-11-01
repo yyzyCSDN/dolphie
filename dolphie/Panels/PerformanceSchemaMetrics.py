@@ -7,10 +7,18 @@ from datetime import datetime
 from rich.text import Text
 
 from dolphie.DataTypes import DatabaseScalar
+from dolphie.Modules.FileIOAttribution import (
+    UNATTRIBUTED_KEY,
+    FileIOAttributionLedger,
+    LedgerEntry,
+    parse_object_name,
+)
 from dolphie.Modules.Functions import coerce_float, format_bytes, format_number, format_time
 from dolphie.Modules.PerformanceSchemaMetrics import FilteredValue
 from dolphie.Modules.TabManager import Tab
 from dolphie.Modules.Theme import HIGHLIGHT, LIGHT_BLUE
+
+ATTRIBUTION_TAB_ID = "pfs_metrics_file_io_attribution_tab"
 
 
 def _metric_value(metrics: dict[str, FilteredValue], field: str, mode: str) -> DatabaseScalar:
@@ -34,11 +42,132 @@ def _format_file_or_table_name(file_name: str, table_pattern: re.Pattern[str]) -
     return label
 
 
+def _format_attribution_target(entry: LedgerEntry) -> str:
+    if entry.kind == "unattributed":
+        return "[$yellow]Unattributed[/$yellow]"
+
+    if entry.kind == "space":
+        space_type = f" [$dark_gray]{entry.detail}[/$dark_gray]" if entry.detail else ""
+        return f"[$light_blue]{entry.name}[/$light_blue]{space_type}"
+
+    qualified, partition, subpartition = parse_object_name(entry.name)
+    identity_suffix = f" [$dark_gray]id {entry.detail}[/$dark_gray]" if entry.detail else ""
+    if partition:
+        partition_label = partition
+        if subpartition:
+            partition_label = f"{partition}/{subpartition}"
+        return f"{qualified} [$dark_gray]partition {partition_label}[/$dark_gray]{identity_suffix}"
+
+    return f"{qualified}{identity_suffix}"
+
+
+def _format_attribution_bytes(value: int) -> str:
+    return format_bytes(value) if value > 0 else "[$dark_gray]0"
+
+
+def _attributed_kind_label(kind: str) -> str:
+    labels = {"table": "Table", "partition": "Partition", "space": "Shared"}
+    return labels.get(kind, "")
+
+
+def update_file_io_attribution(tab: Tab) -> None:
+    dolphie = tab.dolphie
+    datatable = tab.pfs_metrics_file_io_attribution_datatable
+    info_label = tab.pfs_metrics_attribution_info
+    ledger: FileIOAttributionLedger | None = dolphie.file_io_attribution
+
+    if ledger is None:
+        # Shared widget: keep it empty for replay/MariaDB/MySQL 5.7/daemon host tabs.
+        tab.pfs_metrics_tabs.hide_tab(ATTRIBUTION_TAB_ID)
+        datatable.display = False
+        if datatable.row_count:
+            datatable.clear()
+        info_label.update(
+            "💡 [$label]Physical file I/O attribution is available on live MySQL 8.0+ InnoDB hosts[/$label]"
+        )
+        return
+
+    tab.pfs_metrics_tabs.show_tab(ATTRIBUTION_TAB_ID)
+    datatable.display = True
+
+    columns = {
+        "Attribution Target": {"width": None},
+        "Kind": {"width": 10},
+        "Read Bytes": {"width": 12},
+        "Write Bytes": {"width": 12},
+        "Last Read": {"width": 12},
+        "Last Write": {"width": 12},
+        # Ascending sort: attributed rows keyed by negated totals (largest first),
+        # the unattributed row carries a sentinel so it stays pinned last.
+        "sort_key": {"width": 0},
+    }
+    unattributed_sort_sentinel = 2**62
+
+    if not datatable.columns:
+        for column_key, column_data in columns.items():
+            datatable.add_column(column_key, key=column_key, width=column_data["width"])
+
+    data = ledger.display_entries()
+    current_rows = {entry.key for entry in data}
+    existing_rows = set(datatable.rows.keys())
+    rows_to_remove = existing_rows - current_rows
+
+    changed = False
+    with dolphie.app.batch_update():
+        for row_id in rows_to_remove:
+            changed = True
+            datatable.remove_row(row_id)
+
+        for entry in data:
+            total_bytes = entry.read_bytes + entry.write_bytes
+            sort_key = unattributed_sort_sentinel if entry.key == UNATTRIBUTED_KEY else -total_bytes
+            row_values = [
+                _format_attribution_target(entry),
+                _attributed_kind_label(entry.kind),
+                _format_attribution_bytes(entry.read_bytes),
+                _format_attribution_bytes(entry.write_bytes),
+                _format_attribution_bytes(entry.last_read_bytes),
+                _format_attribution_bytes(entry.last_write_bytes),
+                sort_key,
+            ]
+            row_values = datatable.normalize_cells(row_values)
+
+            if entry.key in datatable.rows:
+                datatable_row = datatable.get_row(entry.key)
+                for column_id, column_key in enumerate(columns):
+                    if row_values[column_id] != datatable_row[column_id]:
+                        changed = True
+                        datatable.update_cell(entry.key, column_key, row_values[column_id])
+            else:
+                changed = True
+                datatable.add_row(*row_values, key=entry.key)
+
+        if changed:
+            datatable.sort("sort_key")
+
+    conservation = "[$green]conservation ✓[/$green]" if ledger.conservation_holds() else "[$red]conservation ✗[/$red]"
+    if ledger.samples < 2:
+        info_label.update(
+            "💡 [$label]Establishing baseline — bytes are attributed from the second consecutive "
+            "successful sample[/$label]"
+        )
+    else:
+        info_label.update(
+            f"💡 Ledger since observation began · samples [$light_blue]{ledger.samples}[/$light_blue] · "
+            f"computed R {_format_attribution_bytes(ledger.total_computed_read)} "
+            f"W {_format_attribution_bytes(ledger.total_computed_write)} · "
+            f"missing measurements [$yellow]{ledger.missing_intervals}[/$yellow] · "
+            f"counter rollbacks [$yellow]{ledger.rollback_events}[/$yellow] · "
+            f"mapping transitions [$yellow]{ledger.transition_intervals}[/$yellow] · {conservation}"
+        )
+
+
 def create_panel(tab: Tab) -> None:
     dolphie = tab.dolphie
 
     update_file_io_by_instance(tab)
     update_table_io_waits_summary_by_table(tab)
+    update_file_io_attribution(tab)
 
     if dolphie.replay_file:
         time = dolphie.global_status.get("replay_pfs_metrics_last_reset_time", 0)

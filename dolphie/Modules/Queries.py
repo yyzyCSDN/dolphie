@@ -342,6 +342,30 @@ class MySQLQueries:
         WHERE
             COUNT_STAR > 0
     """
+    # Identity sources for the InnoDB physical file I/O attribution ledger (MySQL 8+).
+    # Paths are resolved against @@datadir and matched exactly to FILE_NAME from
+    # performance_schema.file_summary_by_instance; no name guessing is done.
+    innodb_tablespaces: str = """
+        SELECT
+            SPACE,
+            NAME,
+            PATH,
+            SPACE_TYPE
+        FROM
+            information_schema.INNODB_TABLESPACES
+    """
+    innodb_tables: str = """
+        SELECT
+            TABLE_ID,
+            NAME,
+            SPACE
+        FROM
+            information_schema.INNODB_TABLES
+    """
+    get_datadir: str = """
+        SELECT
+            @@datadir AS datadir
+    """
     table_io_waits_summary_by_table: str = """
         SELECT
             CONCAT(OBJECT_SCHEMA,'.', OBJECT_NAME) AS OBJECT_TABLE,
