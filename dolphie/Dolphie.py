@@ -20,6 +20,7 @@ from dolphie.Modules.ArgumentParser import Config
 from dolphie.Modules.Functions import coerce_int, coerce_str, is_sqlite_database, load_host_cache_file
 from dolphie.Modules.MySQL import ConnectionSource, Database
 from dolphie.Modules.PerformanceSchemaMetrics import PerformanceSchemaMetrics
+from dolphie.Modules.ProxySQLQueryRuleTracker import QueryRuleTracker, RuleSample
 from dolphie.Modules.Queries import MySQLQueries
 from dolphie.Modules.Theme import themed_content
 
@@ -194,6 +195,10 @@ class Dolphie:
         self.proxysql_hostgroup_summary: list[DataTypes.DatabaseRow] = []
         self.proxysql_mysql_query_rules: list[DataTypes.DatabaseRow] = []
         self.proxysql_per_second_data: dict[str, dict[str, int]] = {}
+        # The version-scoped query-rules observation for the latest poll (None while unsupported,
+        # before the panel was first opened, or on a replay frame that recorded no rules)
+        self.proxysql_rule_sample: RuleSample | None = None
+        self.proxysql_query_rule_tracker = QueryRuleTracker()
         self.proxysql_command_stats: list[dict[str, int | str]] = []
         self.processlist_threads: dict[int, DataTypes.ProcesslistThread | DataTypes.ProxySQLProcesslistThread] = {}
         self.processlist_threads_snapshot: dict[

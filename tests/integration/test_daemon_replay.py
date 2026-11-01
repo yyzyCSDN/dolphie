@@ -233,13 +233,20 @@ async def test_proxysql_daemon_recording_plays_back_in_the_tui(proxysql_server: 
         await harness.press("right_square_bracket")
         await harness.wait_for(lambda: replay_manager.current_replay_id == current + 1, message="step forward")
 
-        # Hostgroup Summary is the one ProxySQL panel a replay can show. Query Rules and Command Stats
-        # are live-only, so CommandManager's proxysql_replay catalog ignores their keys.
-        for key in ("4", "5", "6"):
+        # Hostgroup Summary is the one ProxySQL panel a daemon recording can populate. Query
+        # Rules can now be opened during replay, but a daemon recording predates its data, so
+        # it states the history is unavailable; Command Stats remain live-only (key 6 ignored).
+        for key in ("4", "6"):
             await harness.press(key)
         assert dolphie.panels.proxysql_hostgroup_summary.visible
-        assert not dolphie.panels.proxysql_mysql_query_rules.visible
         assert not dolphie.panels.proxysql_command_stats.visible
+
+        await harness.press("5")
+        assert dolphie.panels.proxysql_mysql_query_rules.visible
+        rules_status = str(harness.tab.proxysql_mysql_query_rules_status.content)
+        assert "unavailable" in rules_status
+        assert harness.tab.proxysql_mysql_query_rules_datatable.row_count == 0
+
         await harness.press("right_square_bracket")
         await harness.wait_for(lambda: replay_manager.current_replay_id == current + 2, message="step forward")
         assert any(row.get("srv_host") == "mysql84" for row in dolphie.proxysql_hostgroup_summary)

@@ -16,6 +16,8 @@ from dolphie.Panels import Replication as ReplicationPanel
 
 if TYPE_CHECKING:
     from dolphie.App import DolphieApp
+    from dolphie.Dolphie import Dolphie
+    from dolphie.Modules.MySQL import Database
     from dolphie.Modules.TabManager import Tab
 
 
@@ -607,8 +609,62 @@ class WorkerDataProcessor:
             dolphie.processlist_threads = ProxySQLProcesslistPanel.fetch_data(tab)
 
         if dolphie.panels.proxysql_mysql_query_rules.visible:
-            dolphie.main_db_connection.execute(ProxySQLQueries.query_rules_summary)
-            dolphie.proxysql_mysql_query_rules = dolphie.main_db_connection.fetchall()
+            self._fetch_proxysql_query_rules(dolphie)
+
+    def _fetch_proxysql_query_rules(self, dolphie: "Dolphie") -> None:
+        """Fetch active query rules and pin them to one confirmed runtime rule version.
+
+        On ProxySQL 3.0+ the rules are bracketed by reads of runtime_checksums_values: rule
+        text and hits are only attributed to a version when the checksum is identical on both
+        sides, so a LOAD between the reads makes the sample unconfirmed instead of linking
+        across it. Older ProxySQL has no per-load version metadata, so it keeps the legacy
+        rule_id rate view.
+        """
+        connection = dolphie.main_db_connection
+
+        if not dolphie.is_mysql_version_at_least("3.0"):
+            connection.execute(ProxySQLQueries.query_rules_summary)
+            dolphie.proxysql_mysql_query_rules = connection.fetchall()
+            dolphie.proxysql_rule_sample = None
+            return
+
+        version_before = self._fetch_query_rule_version(connection)
+        connection.execute(ProxySQLQueries.query_rules_summary)
+        rules = connection.fetchall()
+        version_after = self._fetch_query_rule_version(connection)
+
+        confirmed = version_before is not None and version_before == version_after
+        version_tuple: tuple[int, int, str] | tuple[None, None, None] = (
+            version_before if version_before is not None and version_before == version_after else (None, None, None)
+        )
+        runtime_version, epoch, checksum = version_tuple
+
+        dolphie.proxysql_rule_sample = dolphie.proxysql_query_rule_tracker.record(
+            rules,
+            runtime_version=runtime_version,
+            epoch=epoch,
+            checksum=checksum,
+            connection_generation=connection.generation,
+            confirmed=confirmed,
+        )
+        dolphie.proxysql_mysql_query_rules = dolphie.proxysql_rule_sample.rules
+
+    @staticmethod
+    def _fetch_query_rule_version(connection: "Database") -> tuple[int, int, str] | None:
+        """The mysql_query_rules checksum row, or None when it cannot be read."""
+        connection.execute(ProxySQLQueries.query_rules_runtime_version, ignore_error=True)
+        rows = connection.fetchall()
+        row = next((entry for entry in rows if coerce_str(entry.get("name")) == "mysql_query_rules"), None)
+        if row is None:
+            return None
+
+        version = row.get("version")
+        epoch = row.get("epoch")
+        checksum = coerce_str(row.get("checksum"))
+        if version is None or epoch is None or not checksum:
+            return None
+
+        return coerce_int(version), coerce_int(epoch), checksum
 
     def refresh_screen(self, tab: "Tab"):
         """Refresh the screen for a given tab, regardless of connection source."""

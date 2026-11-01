@@ -1,9 +1,32 @@
 from dolphie.Modules.Functions import coerce_int, coerce_str, format_number
+from dolphie.Modules.ProxySQLQueryRuleTracker import breakpoint_markup, version_status_markup
 from dolphie.Modules.TabManager import Tab
+
+UNAVAILABLE_RATE = "[$dark_gray]\u2013"
 
 
 def create_panel(tab: Tab) -> None:
     dolphie = tab.dolphie
+    sample = dolphie.proxysql_rule_sample
+    rules_status = tab.proxysql_mysql_query_rules_status
+    mysql_query_rules = tab.proxysql_mysql_query_rules_datatable
+
+    # An old recording (or one made while this panel was closed) has no per-sample rule
+    # evidence. Never read the live proxy to stand in for it: say the history is unavailable.
+    if dolphie.replay_file and sample is None:
+        if mysql_query_rules.row_count:
+            mysql_query_rules.clear(columns=True)
+        rules_status.update(
+            "[$dark_yellow]Query rule version history is unavailable for this recording.[/$dark_yellow]\n"
+            "[$dark_gray]This file holds no query-rule samples for this frame (it was recorded by an older "
+            "Dolphie, in daemon mode, or while the Query Rules panel was closed). Hit rates and rule text "
+            "cannot be reconstructed after the fact, so the current online configuration is not shown."
+            "[/$dark_gray]"
+        )
+        tab.proxysql_mysql_query_rules_title.update(
+            f"{dolphie.panels.proxysql_mysql_query_rules.title} ([$highlight]0[/$highlight])"
+        )
+        return
 
     all_columns = {
         "rule_id": {"name": "Rule ID", "format": None, "always_show": True},
@@ -80,12 +103,14 @@ def create_panel(tab: Tab) -> None:
         "comment": {"name": "Comment", "format": None, "always_show": False},
     }
 
+    rules = sample.rules if sample is not None else dolphie.proxysql_mysql_query_rules
+
     # Filter only relevant columns from all_columns based on data presence or always_show flag
     columns_with_data = {
         column
-        for row in dolphie.proxysql_mysql_query_rules
+        for row in rules
         for column, value in row.items()
-        if value not in (None, "", "NULL", 0, "0") or all_columns[column]["always_show"]
+        if column in all_columns and (value not in (None, "", "NULL", 0, "0") or all_columns[column]["always_show"])
     }
 
     # Build the filtered columns dictionary using only columns_with_data
@@ -99,8 +124,8 @@ def create_panel(tab: Tab) -> None:
         if column in columns_with_data
     }
 
-    mysql_query_rules = tab.proxysql_mysql_query_rules_datatable
     per_second_data = dolphie.proxysql_per_second_data
+    polling_latency = dolphie.polling_latency
 
     # Clear table if columns change
     if len(mysql_query_rules.columns) != len(columns_filtered):
@@ -120,17 +145,15 @@ def create_panel(tab: Tab) -> None:
         column_names.append(column_data["name"])
         column_formats.append(column_data["format"])
 
-    polling_latency = dolphie.polling_latency
-
     with dolphie.app.batch_update():
         # Remove stale rows first
-        if dolphie.proxysql_mysql_query_rules:
-            current_rows = {row["rule_id"] for row in dolphie.proxysql_mysql_query_rules}
+        if rules:
+            current_rows = {coerce_str(row.get("rule_id")) for row in rules}
             existing_rows = set(mysql_query_rules.rows.keys())
 
             rows_to_remove = existing_rows - current_rows
             if rows_to_remove:
-                if len(rows_to_remove) > len(dolphie.proxysql_mysql_query_rules):
+                if len(rows_to_remove) > len(rules):
                     mysql_query_rules.clear()
                 else:
                     for row_id in rows_to_remove:
@@ -139,7 +162,7 @@ def create_panel(tab: Tab) -> None:
             if mysql_query_rules.row_count:
                 mysql_query_rules.clear()
 
-        for row in dolphie.proxysql_mysql_query_rules:
+        for row in rules:
             row_id = coerce_str(row.get("rule_id"))
             if not row_id:
                 continue
@@ -149,21 +172,28 @@ def create_panel(tab: Tab) -> None:
                 column_value = row.get(column_key)
 
                 # Calculate the values per second for the following columns
-                if column_key in ["hits_s"]:
-                    previous_value = per_second_data.get(row_id, {}).get(column_key, 0)
-                    if not previous_value:
-                        column_value = "[$dark_gray]0"
+                if column_key == "hits_s":
+                    if sample is not None:
+                        # Version-scoped rate: a boundary (reload/reconnect/rollback/first
+                        # sample) renders a dash, never a zero or a cross-version rate
+                        rate = sample.rate_for(row_id)
+                        column_value = UNAVAILABLE_RATE if rate is None else rate
                     else:
-                        current_value = coerce_int(column_value)
-                        value_diff = current_value - previous_value
-                        column_value = round(value_diff / polling_latency) if polling_latency > 0 else 0
+                        # Legacy ProxySQL (< 3.0): keep the rule_id-delta view
+                        previous_value = per_second_data.get(row_id, {}).get(column_key, 0)
+                        if not previous_value:
+                            column_value = "[$dark_gray]0"
+                        else:
+                            current_value = coerce_int(column_value)
+                            value_diff = current_value - previous_value
+                            column_value = round(value_diff / polling_latency) if polling_latency > 0 else 0
 
-                    per_second_data.setdefault(row_id, {})[column_key] = coerce_int(row.get(column_key))
+                        per_second_data.setdefault(row_id, {})[column_key] = coerce_int(row.get(column_key))
 
                 if column_key in ["apply", "log"]:
                     column_value = "Yes" if column_value == "1" else "No"
 
-                if column_format == "number":
+                if column_format == "number" and column_value != UNAVAILABLE_RATE:
                     column_value = format_number(coerce_int(column_value))
 
                 if column_value is None:
@@ -182,6 +212,15 @@ def create_panel(tab: Tab) -> None:
                         mysql_query_rules.update_cell(row_id, column_key, row_values[column_id])
             else:
                 mysql_query_rules.add_row(*row_values, key=row_id)
+
+    if sample is not None:
+        status_lines = [version_status_markup(sample)]
+        boundary = breakpoint_markup(sample)
+        if boundary:
+            status_lines.append(boundary)
+        rules_status.update("\n".join(status_lines))
+    else:
+        rules_status.update("")
 
     tab.proxysql_mysql_query_rules_title.update(
         f"{dolphie.panels.proxysql_mysql_query_rules.title} ([$highlight]{mysql_query_rules.row_count}[/$highlight])"

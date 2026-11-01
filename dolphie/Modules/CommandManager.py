@@ -374,6 +374,10 @@ class CommandManager:
                         "human_key": "4",
                         "description": "Toggle panel Hostgroup Summary",
                     },
+                    "5": {
+                        "human_key": "5",
+                        "description": "Toggle panel Query Rules",
+                    },
                     "placeholder_1": {"human_key": "", "description": ""},
                     "grave_accent": {"human_key": "`", "description": "Open tab setup"},
                     "plus": {"human_key": "+", "description": "Create a new tab"},

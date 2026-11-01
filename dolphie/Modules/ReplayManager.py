@@ -66,6 +66,9 @@ class ProxySQLReplayData:
     hostgroup_summary: list[DatabaseRow]
     processlist: dict[int, ProxySQLProcesslistThread]
     metric_manager: dict[str, Any]
+    # Version-scoped query rules captured for this row, or None for rows that recorded none
+    # (old Dolphie versions, daemon recordings, or the panel not being recorded)
+    query_rules: dict[str, Any] | None = None
 
 
 ProcesslistThreadType = TypeVar("ProcesslistThreadType", ProcesslistThread, ProxySQLProcesslistThread)
@@ -1133,6 +1136,11 @@ class ReplayManager:
                     "hostgroup_summary": self.dolphie.proxysql_hostgroup_summary,
                 }
             )
+            # The Query Rules panel is opt-in per poll. Its sample carries the rule text, the
+            # effective runtime version, and the hits attributable to it, so playback restores
+            # the rule state as observed instead of reading the live proxy
+            if self.dolphie.proxysql_rule_sample is not None:
+                data_dict["query_rules"] = self.dolphie.proxysql_rule_sample.to_replay()
 
         # Serialize and compress the data
         data_dict_bytes = self._serialize_data_dict(data_dict)
@@ -1339,6 +1347,7 @@ class ReplayManager:
             command_stats=self._as_list(data.get("command_stats")),
             hostgroup_summary=self._as_list(data.get("hostgroup_summary")),
             processlist=processlist,
+            query_rules=self._as_dict(data.get("query_rules")) or None,
         )
 
     def get_next_refresh_interval(

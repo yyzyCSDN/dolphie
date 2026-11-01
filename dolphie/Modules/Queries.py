@@ -70,6 +70,21 @@ class ProxySQLQueries:
         ORDER BY
             hits DESC
     """
+    # ProxySQL 3.0's runtime checksums for every configuration module. The mysql_query_rules
+    # row's version increments on every LOAD MYSQL QUERY RULES TO RUNTIME (even when the rule
+    # text is unchanged), epoch says when the version was created, and checksum identifies
+    # contents. Read before and after the rules query so a reload between them makes the
+    # sample unconfirmed. All rows are fetched and filtered client-side to stay within the
+    # admin interface's supported query shapes.
+    query_rules_runtime_version: str = """
+        SELECT
+            name,
+            version,
+            epoch,
+            checksum
+        FROM
+            runtime_checksums_values
+    """
     command_stats: str = """
         SELECT
             *,

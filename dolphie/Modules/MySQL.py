@@ -58,6 +58,9 @@ class Database:
         self.connection: pymysql.Connection | None = None
         self.cursor: pymysql.cursors.DictCursor | None = None
         self.connection_id: int | None = None
+        # Increments on every successful (re)connect, so monitors that pin observations to one
+        # admin connection can tell a rebuilt connection apart without trusting its counters
+        self.generation: int = 0
         self.source: ConnectionSourceType | None = None
         self.is_running_query: bool = False
         self.has_connected: bool = False
@@ -95,6 +98,7 @@ class Database:
             )
             self.connection = connection
             self.cursor = connection.cursor(pymysql.cursors.DictCursor)
+            self.generation += 1
 
             # If the query is successful, then the connection is to ProxySQL
             try:

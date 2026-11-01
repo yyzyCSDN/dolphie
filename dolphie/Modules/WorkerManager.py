@@ -11,6 +11,7 @@ from dolphie.DataTypes import ConnectionSource, ConnectionStatus
 from dolphie.Modules.Functions import coerce_float, coerce_str
 from dolphie.Modules.ManualException import ManualException
 from dolphie.Modules.MetricDefinitions import MetricData, MetricValue, parse_metric_datetime
+from dolphie.Modules.ProxySQLQueryRuleTracker import RuleSample
 from dolphie.Modules.ReplayManager import MySQLReplayData, ProxySQLReplayData, ReplayManager
 from dolphie.Modules.WorkerDataProcessor import is_group_replication_primary
 from dolphie.Panels import Replication as ReplicationPanel
@@ -159,6 +160,14 @@ class WorkerManager:
                 dolphie.proxysql_command_stats = cast(list[dict[str, int | str]], replay_event_data.command_stats)
                 dolphie.proxysql_hostgroup_summary = replay_event_data.hostgroup_summary
                 dolphie.processlist_threads = dict(replay_event_data.processlist)
+
+                # Restore the query rules exactly as the row recorded them. A frame without a
+                # query_rules payload leaves the sample at None so the panel reports the
+                # history as unavailable instead of reading the current online proxy
+                dolphie.proxysql_rule_sample = RuleSample.from_replay(replay_event_data.query_rules)
+                dolphie.proxysql_mysql_query_rules = (
+                    dolphie.proxysql_rule_sample.rules if dolphie.proxysql_rule_sample else []
+                )
 
                 connection_source_metrics = {"proxysql_command_stats": dolphie.proxysql_command_stats}
             else:

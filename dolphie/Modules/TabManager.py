@@ -134,6 +134,7 @@ class Tab:
         self.proxysql_hostgroup_summary_datatable = app.query_one("#proxysql_hostgroup_summary_datatable", DataTable)
         self.proxysql_mysql_query_rules_title = app.query_one("#proxysql_mysql_query_rules_title", Static)
         self.proxysql_mysql_query_rules_datatable = app.query_one("#proxysql_mysql_query_rules_datatable", DataTable)
+        self.proxysql_mysql_query_rules_status = app.query_one("#proxysql_mysql_query_rules_status", Static)
         self.proxysql_command_stats_title = app.query_one("#proxysql_command_stats_title", Static)
         self.proxysql_command_stats_datatable = app.query_one("#proxysql_command_stats_datatable", DataTable)
 
@@ -437,6 +438,7 @@ class TabManager:
                 ),
                 Container(
                     Label(id="proxysql_mysql_query_rules_title"),
+                    Static(id="proxysql_mysql_query_rules_status"),
                     DataTable(
                         id="proxysql_mysql_query_rules_datatable",
                         classes="proxysql_mysql_query_rules_datatable",
